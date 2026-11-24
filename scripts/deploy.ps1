@@ -30,7 +30,8 @@ foreach ($svc in "api1", "api2", "api3") {
     Write-Host "  -> replacing $svc"
     docker compose up -d --no-build --no-deps --force-recreate $svc | Out-Null
     if (-not (Wait-Healthy "qe-$svc")) { Fail "$svc did not become healthy" }
-    Write-Host "     $svc healthy" -ForegroundColor Green
+    docker exec qe-nginx nginx -s reload | Out-Null   # graceful: re-resolve the replica's new IP
+    Write-Host "     $svc healthy, nginx reloaded" -ForegroundColor Green
 }
 
 Step "4/5" "Update Kafka consumers"
