@@ -172,6 +172,22 @@ services:
       retries: 20
     restart: unless-stopped
 
+  # ================= APPLICATION (one image: quicketa-app) =================
+  # Batch EtLT pipeline (P6) - run on demand:  docker compose run --rm pipeline
+  pipeline:
+    build: .
+    image: quicketa-app:latest
+    container_name: qe-pipeline
+    profiles: ["jobs"]
+    networks: [backend]
+    command: python -m app.pipeline.run_pipeline
+    volumes:
+      - ./data:/srv/data
+      - ./models:/srv/models
+    depends_on:
+      mongos: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+
 networks:
   backend:
     name: quicketa_backend

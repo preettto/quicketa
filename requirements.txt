@@ -1,0 +1,19 @@
+# --- data & ML ---
+pandas==2.2.3
+numpy==2.1.3
+scikit-learn==1.6.1
+lightgbm==4.6.0
+joblib==1.4.2
+# --- storage / messaging ---
+pymongo==4.10.1
+psycopg2-binary==2.9.10
+redis==5.2.1
+confluent-kafka==2.8.0
+# --- API ---
+flask==3.1.0
+graphene==3.4.3
+gunicorn==23.0.0
+requests==2.32.3
+# --- dev / CI ---
+pytest==8.3.4
+ruff==0.9.6

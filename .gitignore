@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 .env
 data/raw/*.csv
+data/cache/
+data/output/
 !data/raw/.gitkeep
 .pytest_cache/
 .ruff_cache/
