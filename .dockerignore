@@ -1,6 +1,5 @@
 .git
 data
-models
 docs
 .venv
 __pycache__

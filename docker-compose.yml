@@ -1,6 +1,6 @@
 # QuickETA — docker-compose.yml
 # Phase 3: infrastructure (MongoDB sharded cluster, Kafka, PostgreSQL, Redis)
-# Application services (API, consumers, pipeline, nginx) are added in later phases.
+# + application: batch pipeline, 3 API replicas behind nginx, 2 Kafka consumer groups.
 
 name: quicketa
 
@@ -17,6 +17,24 @@ x-mongod: &mongod
     interval: 5s
     timeout: 5s
     retries: 20
+
+x-api: &api
+  image: quicketa-app:latest
+  networks: [backend]
+  command: gunicorn -w 1 --threads 4 -b 0.0.0.0:8000 --access-logfile - "app.api.main:create_app()"
+  volumes:
+    - ./models:/srv/models:ro
+  depends_on:
+    mongos: {condition: service_healthy}
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+    kafka-init: {condition: service_completed_successfully}
+  healthcheck:
+    test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 10
+  restart: unless-stopped
 
 services:
   # ---------------- MongoDB: config server replica set (1 node) ----------------
@@ -188,26 +206,53 @@ services:
       mongos: {condition: service_healthy}
       postgres: {condition: service_healthy}
 
-  # API (P1 REST + P2 GraphQL).  Phase 7 will scale this to api1..api3 behind nginx.
+  # ---------------- API replicas (P1 REST + P2 GraphQL), same image ----------------
   api1:
-    image: quicketa-app:latest
+    <<: *api
     container_name: qe-api1
+    ports: ["8000:8000"]          # direct access kept ONLY for single-instance benchmarks
+    environment: {INSTANCE_NAME: api1, TZ: Asia/Kolkata}
+  api2:
+    <<: *api
+    container_name: qe-api2
+    environment: {INSTANCE_NAME: api2, TZ: Asia/Kolkata}
+  api3:
+    <<: *api
+    container_name: qe-api3
+    environment: {INSTANCE_NAME: api3, TZ: Asia/Kolkata}
+
+  # ---------------- Nginx round-robin load balancer / gateway (P8) ----------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: qe-nginx
     networks: [backend]
-    ports: ["8000:8000"]
-    environment:
-      INSTANCE_NAME: api1
-      TZ: Asia/Kolkata
-    command: gunicorn -w 2 --threads 4 -b 0.0.0.0:8000 --access-logfile - "app.api.main:create_app()"
-    volumes:
-      - ./models:/srv/models:ro
+    ports: ["8080:8080"]
+    volumes: [./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro]
     depends_on:
+      api1: {condition: service_healthy}
+      api2: {condition: service_healthy}
+      api3: {condition: service_healthy}
+    restart: unless-stopped
+
+  # ---------------- Kafka consumers (P3). No container_name -> can be scaled with --scale ----------------
+  store-consumer:
+    image: quicketa-app:latest
+    networks: [backend]
+    command: python -m app.consumers.store_consumer
+    environment: {TZ: Asia/Kolkata}
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
       mongos: {condition: service_healthy}
-      postgres: {condition: service_healthy}
-    healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+    restart: unless-stopped
+
+  stats-consumer:
+    image: quicketa-app:latest
+    networks: [backend]
+    command: python -m app.consumers.stats_consumer
+    environment: {TZ: Asia/Kolkata}
+    depends_on:
+      kafka-init: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
     restart: unless-stopped
 
 networks:

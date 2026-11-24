@@ -1,16 +1,23 @@
 """Business logic for placing an order and getting its ETA.
 Shared by the REST endpoint and the GraphQL mutation, so both behave identically.
+
+Request path:
+  validate -> partner (Redis -> Postgres) -> weather (Redis -> API w/ retry+breaker -> fallback)
+  -> features -> ETA (Redis -> model) -> publish 'order_placed' to Kafka -> respond
+  (MongoDB is written ASYNCHRONOUSLY by the order-store consumer.)
 """
 import os
 import time
 import uuid
 from datetime import datetime, timedelta
 
-from app.ml.predictor import load_model, predict_minutes
-from app.services import partners, weather
+from app import cache
+from app.ml import predictor
+from app.services import events, partners, weather
 from app.services.storage import mongo_db
 
 INSTANCE = os.getenv("INSTANCE_NAME", os.getenv("HOSTNAME", "local"))
+ETA_TTL_S = 120
 
 ALLOWED = {
     "traffic": {"Low", "Medium", "High", "Jam"},
@@ -27,29 +34,36 @@ class ValidationError(ValueError):
 
 
 def validate(body: dict) -> dict:
+    if not isinstance(body, dict):
+        raise ValidationError("body must be a JSON object")
     missing = [k for k in REQUIRED if k not in body]
     if missing:
         raise ValidationError(f"missing fields: {missing}")
     for side in ("restaurant", "delivery"):
         loc = body[side]
-        if not (-90 <= float(loc.get("lat", 999)) <= 90 and -180 <= float(loc.get("lon", 999)) <= 180):
+        try:
+            lat, lon = float(loc["lat"]), float(loc["lon"])
+        except (KeyError, TypeError, ValueError):
+            raise ValidationError(f"{side} needs numeric lat and lon")
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             raise ValidationError(f"{side}.lat/lon out of range")
-        if float(loc["lat"]) == 0 and float(loc["lon"]) == 0:
+        if lat == 0 and lon == 0:
             raise ValidationError(f"{side} location cannot be (0,0)")
     for field, allowed in ALLOWED.items():
         if field in body and body[field] not in allowed:
             raise ValidationError(f"{field} must be one of {sorted(allowed)}")
-    if "RES" not in body["partner_id"]:
+    if "RES" not in str(body["partner_id"]):
         raise ValidationError("partner_id must look like 'INDORES13DEL02'")
     return body
 
 
-def build_order(body: dict) -> dict:
-    """Turn the API request into the canonical (pipeline-compatible) order record."""
+def build_order(body: dict):
+    """API request -> canonical (pipeline-compatible) order record + cache statuses."""
     ts = datetime.fromisoformat(body["order_ts"]) if body.get("order_ts") else datetime.now()
-    p = partners.get_partner(body["partner_id"]) or {"age": None, "rating": None}
-    w = weather.get_weather(body["restaurant"]["lat"], body["restaurant"]["lon"])
-    return {
+    p, p_cache = partners.get_partner(body["partner_id"])
+    p = p or {"age": None, "rating": None}
+    w, w_cache = weather.get_weather(float(body["restaurant"]["lat"]), float(body["restaurant"]["lon"]))
+    order = {
         "order_id": uuid.uuid4().hex[:12],
         "partner_id": body["partner_id"],
         "city_code": body["partner_id"].split("RES")[0],
@@ -65,6 +79,18 @@ def build_order(body: dict) -> dict:
         "temp_c": w["temp_c"], "precip_mm": w["precip_mm"], "wind_kmh": w["wind_kmh"],
         "weather_source": w["source"],
     }
+    return order, {"partner": p_cache, "weather": w_cache}
+
+
+def predict_with_cache(order: dict):
+    X = predictor.features_for(order)
+    key = f"eta:{predictor.feature_key(X)}"
+    hit = cache.get_json(key)
+    if hit is not None:
+        return hit, "hit"
+    eta = predictor.predict_features(X)
+    cache.set_json(key, eta, ttl_s=ETA_TTL_S)
+    return eta, "miss"
 
 
 def to_document(o: dict, eta: float, model_version: str) -> dict:
@@ -84,24 +110,31 @@ def to_document(o: dict, eta: float, model_version: str) -> dict:
     }
 
 
-def store(doc: dict):
-    """Phase 5: synchronous write.  (Phase 6 replaces this with a Kafka publish.)"""
-    mongo_db()["orders"].insert_one(dict(doc))
+def store(doc: dict) -> dict:
+    """Async path: publish to Kafka. If Kafka is unavailable, degrade to a direct MongoDB write
+    (upsert on order_id, so a late Kafka delivery later cannot create a duplicate)."""
+    try:
+        return {"path": "kafka", **events.publish(doc)}
+    except Exception as exc:
+        mongo_db()["orders"].replace_one({"order_id": doc["order_id"]}, doc, upsert=True)
+        return {"path": "direct-mongodb-fallback", "reason": type(exc).__name__}
 
 
 def place_order(body: dict) -> dict:
     t0 = time.perf_counter()
-    order = build_order(validate(body))
-    eta = predict_minutes(order)
-    _, meta = load_model()
+    order, cache_status = build_order(validate(body))
+    eta, cache_status["eta"] = predict_with_cache(order)
+    _, meta = predictor.load_model()
     doc = to_document(order, eta, meta["model_version"])
-    store(doc)
+    storage = store(doc)
     return {
         "order_id": order["order_id"],
         "city_code": order["city_code"],
         "eta_minutes": eta,
         "eta_time": (order["order_ts"] + timedelta(minutes=eta)).strftime("%Y-%m-%d %H:%M"),
         "weather": doc["weather"],
+        "cache": cache_status,
+        "storage": storage,
         "model_version": meta["model_version"],
         "served_by": INSTANCE,
         "latency_ms": round((time.perf_counter() - t0) * 1000, 1),

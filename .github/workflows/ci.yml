@@ -1,0 +1,52 @@
+# P4 - Continuous Integration: runs automatically on every push / pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    name: Lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint (ruff)
+        run: ruff check app tests
+
+      - name: Unit tests (pytest)
+        run: pytest -q --junitxml=test-results.xml
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+
+  docker-build:
+    name: Build + smoke-test Docker image
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t quicketa-app:ci .
+
+      - name: Smoke test (app boots and model loads inside the image)
+        run: >
+          docker run --rm quicketa-app:ci python -c
+          "from app.api.main import create_app; from app.ml.predictor import load_model;
+          create_app(); print('image OK, model', load_model()[1]['model_version'])"

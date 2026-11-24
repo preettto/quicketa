@@ -1,8 +1,8 @@
 """Shared connections (one per process; both clients are thread-safe / pooled)."""
 from functools import lru_cache
 
-from pymongo import MongoClient
 from psycopg2.pool import ThreadedConnectionPool
+from pymongo import MongoClient
 
 from app import config
 

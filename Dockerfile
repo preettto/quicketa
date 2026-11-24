@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY tests ./tests
+# the trained model is baked into the image so the CD pipeline ships a self-contained service
+COPY models ./models
 ENV PYTHONUNBUFFERED=1 PYTHONPATH=/srv
 
 # default command is overridden per service in docker-compose.yml

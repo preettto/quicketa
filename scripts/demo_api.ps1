@@ -1,6 +1,6 @@
-# QuickETA - API demo (Phase 5: REST + GraphQL)
+# QuickETA - API demo (REST + GraphQL), through the nginx load balancer by default
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts\demo_api.ps1 [-BaseUrl http://localhost:8000]
-param([string]$BaseUrl = "http://localhost:8000")
+param([string]$BaseUrl = "http://localhost:8080")
 
 function Show($title, $obj) {
     Write-Host "`n=== $title ===" -ForegroundColor Cyan
@@ -28,7 +28,9 @@ Show "POST /api/orders  (traffic = Jam)" $placed
 $low = $order -replace '"Jam"', '"Low"'
 Show "POST /api/orders  (traffic = Low)" (Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/orders" -ContentType "application/json" -Body $low)
 
-# 4. Fetch it back (targeted query on the shard key)
+# 4. Fetch it back (targeted query on the shard key).
+#    MongoDB is written ASYNCHRONOUSLY by the Kafka consumer -> wait a moment (eventual consistency)
+Start-Sleep -Seconds 1
 Show "GET /api/orders/$($placed.order_id)" (Invoke-RestMethod "$BaseUrl/api/orders/$($placed.order_id)")
 
 # 5. Validation error -> 400

@@ -6,10 +6,11 @@ import os
 
 from flask import Flask, jsonify, request
 
+from app import cache
 from app.api.graphql_schema import schema
 from app.ml.predictor import load_model
+from app.services import live_stats, weather
 from app.services import orders as svc
-from app.services import weather
 from app.services.storage import mongo_db, pg_pool
 
 
@@ -47,11 +48,34 @@ def create_app() -> Flask:
             checks["postgres"] = "up"
         except Exception as e:
             checks["postgres"] = f"down: {type(e).__name__}"
+        try:
+            cache.client().ping()
+            checks["redis"] = "up"
+        except Exception as e:
+            checks["redis"] = f"down: {type(e).__name__} (cache bypassed)"
         checks["model"] = load_model()[1]["model_version"]
         checks["weather_circuit"] = weather.breaker.snapshot()
         ok = checks["mongodb"] == "up" and checks["postgres"] == "up"
         return jsonify({"status": "ok" if ok else "degraded", "served_by": svc.INSTANCE,
                         "checks": checks}), (200 if ok else 503)
+
+    @app.get("/api/stats/live")
+    def stats_live():
+        minutes = int(request.args.get("minutes", live_stats.WINDOW_MIN))
+        return jsonify(live_stats.window(minutes))
+
+    # ---------- admin: fault injection + cache control (for demos / benchmarks) ----------
+    @app.route("/admin/chaos", methods=["GET", "POST"])
+    def chaos():
+        if request.method == "POST":
+            cache.set_flag(weather.CHAOS_KEY, bool((request.get_json(force=True) or {}).get("weather_down")))
+        return jsonify({"weather_down": cache.get_flag(weather.CHAOS_KEY),
+                        "weather_circuit": weather.breaker.snapshot(), "served_by": svc.INSTANCE})
+
+    @app.delete("/admin/cache")
+    def flush_cache():
+        removed = {p: cache.delete_pattern(f"{p}:*") for p in ("weather", "partner", "eta")}
+        return jsonify({"removed": removed})
 
     @app.route("/graphql", methods=["POST"])
     def graphql():
@@ -65,7 +89,8 @@ def create_app() -> Flask:
     @app.get("/")
     def index():
         return jsonify({"service": "QuickETA", "served_by": os.getenv("INSTANCE_NAME", "local"),
-                        "endpoints": ["POST /api/orders", "GET /api/orders/<id>", "GET /api/model",
-                                      "GET /health", "POST /graphql"]})
+                        "endpoints": ["POST /api/orders", "GET /api/orders/<id>", "GET /api/stats/live",
+                                      "GET /api/model", "GET /health", "POST /graphql",
+                                      "GET|POST /admin/chaos", "DELETE /admin/cache"]})
 
     return app
